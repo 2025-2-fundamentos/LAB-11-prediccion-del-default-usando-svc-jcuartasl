@@ -95,3 +95,256 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+import pandas as pd
+import os
+import pickle
+import gzip
+from sklearn.model_selection import GridSearchCV
+from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import StandardScaler
+from sklearn.svm import SVC
+
+def load_data():
+    
+    train_data = pd.read_csv('./files/input/train_data.csv.zip', compression='zip')
+    test_data = pd.read_csv('./files/input/test_data.csv.zip', compression='zip')
+
+    return train_data, test_data
+
+train_data, test_data = load_data()
+
+
+def clean_data(data):
+    data = data.copy()
+    data.rename(columns = {'default payment next month':'default'}, inplace = True)
+    data.dropna(inplace=True)
+
+    data["EDUCATION"] = data["EDUCATION"].apply(lambda x: 4 if x not in [1,2,3,4] else x)
+    data.drop(columns=["ID"], inplace=True)
+
+    return data
+
+
+def make_train_test_split(train_data, test_data):
+    
+    x_train = train_data.drop(columns=['default'])
+    y_train = train_data['default']
+    x_test = test_data.drop(columns=['default'])
+    y_test = test_data['default']
+    return x_train, x_test, y_train, y_test
+
+
+def make_pipeline(estimator):
+
+    cat = ["SEX", "MARRIAGE", "EDUCATION"]
+    transformer = ColumnTransformer(
+        transformers=[
+            ("ohe", OneHotEncoder(dtype="int"), cat),
+        ],
+        remainder="passthrough",
+    )
+
+    selectkbest = SelectKBest(score_func=f_classif)
+
+    pipeline = Pipeline(
+        steps=[
+            ("tranformer", transformer),
+            ("pca", PCA(n_components=None)),
+            ("scaler", StandardScaler()),
+            ("selectkbest", selectkbest),
+            ("estimator", estimator),
+        ],
+        verbose=False,
+    )
+
+    return pipeline
+
+
+def make_grid_search(estimator, param_grid, cv=10):
+
+    grid_search = GridSearchCV(
+        estimator=estimator,
+        param_grid=param_grid,
+        cv=cv,
+        scoring="balanced_accuracy",
+    )
+
+    return grid_search
+
+
+def save_estimator(estimator):
+
+    model_dir = "./files/models/"
+    model_name = os.path.join(model_dir, "model.pkl.gz")
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+
+    # Guardar nuevo modelo
+    with gzip.open(model_name, "wb") as f:
+        pickle.dump(estimator, f)
+
+
+def load_estimator():
+
+    if not os.path.exists("./files/models/model.pkl.gz"):
+        return None
+    with gzip.open("./files/models/model.pkl.gz", "rb") as file:
+        estimator = pickle.load(file)
+
+    return estimator
+
+
+def train_estimator(estimator):
+
+    from sklearn.metrics import balanced_accuracy_score
+
+    train_data, test_data = load_data()
+    train_data = clean_data(train_data)
+    test_data = clean_data(test_data)
+
+    x_train, x_test, y_train, y_test = make_train_test_split(train_data, test_data)
+
+    estimator.fit(x_train, y_train)
+
+    best_estimator = load_estimator()
+    if best_estimator is not None:
+
+        saved_bal_acc = balanced_accuracy_score(
+            y_true=y_test, y_pred=best_estimator.predict(x_test)
+        )
+
+        current_bal_acc = balanced_accuracy_score(
+            y_true=y_test, y_pred=estimator.predict(x_test)
+        )
+
+        if saved_bal_acc > current_bal_acc:
+            estimator = best_estimator
+
+    save_estimator(estimator)
+    
+def train_svm():
+    pipeline = make_pipeline(
+        estimator=SVC(),
+    )
+
+    param_grid = {
+        #'selectkbest__score_func': [f_classif, mutual_info_classif],
+        'selectkbest__k': [5],
+        'estimator__kernel': ['rbf', 'linear'],
+        #'estimator__C': [0.1, 1, 10, 100],
+        #'estimator__gamma': ['scale', 'auto']  # only used for rbf
+        }
+
+
+    estimator = make_grid_search(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=10,
+    )
+
+    train_estimator(estimator)
+
+
+train_svm()
+
+
+def eval_metrics(
+    y_train_true,
+    y_test_true,
+    y_train_pred,
+    y_test_pred,
+):
+
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, recall_score, f1_score, confusion_matrix
+
+    accuracy_train = round(accuracy_score(y_train_true, y_train_pred), 4)
+    accuracy_test = round(accuracy_score(y_test_true, y_test_pred), 4)
+    balanced_accuracy_train = round(balanced_accuracy_score(y_train_true, y_train_pred), 4)
+    balanced_accuracy_test = round(balanced_accuracy_score(y_test_true, y_test_pred), 4)
+
+    recall_train = round(recall_score(y_train_true, y_train_pred), 4)
+    recall_test = round(recall_score(y_test_true, y_test_pred), 4)
+    f1_train = round(f1_score(y_train_true, y_train_pred), 4)
+    f1_test = round(f1_score(y_test_true, y_test_pred), 4)
+
+    confusion_matrix_train = confusion_matrix(y_train_true, y_train_pred)
+    confusion_matrix_test = confusion_matrix(y_test_true, y_test_pred)
+
+    metrics_train = {
+        "type": "metrics",
+        "dataset": "train",
+        "precision": accuracy_train,
+        "balanced_accuracy": balanced_accuracy_train,
+        "recall": recall_train,
+        "f1_score": f1_train,
+    }
+
+    metrics_test = {
+        "type": "metrics",
+        "dataset": "test",
+        "precision": accuracy_test,
+        "balanced_accuracy": balanced_accuracy_test,
+        "recall": recall_test,
+        "f1_score": f1_test,
+    }
+
+    cm_matrix_train = {
+        "type": "cm_matrix",
+        "dataset": "train",
+        "true_0" : {
+            "predicted_0": int(confusion_matrix_train[0][0]),
+            "predicted_1": int(confusion_matrix_train[0][1]),
+        },
+        "true_1" : {
+            "predicted_0": int(confusion_matrix_train[1][0]),
+            "predicted_1": int(confusion_matrix_train[1][1]),
+        }
+    }
+
+    cm_matrix_test = {
+        "type": "cm_matrix",
+        "dataset": "test",
+        "true_0" : {
+            "predicted_0": int(confusion_matrix_test[0][0]),
+            "predicted_1": int(confusion_matrix_test[0][1]),
+        },
+        "true_1" : {
+            "predicted_0": int(confusion_matrix_test[1][0]),
+            "predicted_1": int(confusion_matrix_test[1][1]),
+        }
+    }
+
+    return metrics_train, metrics_test, cm_matrix_train, cm_matrix_test
+
+def report(metrics_train, metrics_test, cm_matrix_train, cm_matrix_test):
+    import json
+
+    if not os.path.exists("../files/output/"):
+        os.makedirs("../files/output/")
+    # create the json file if it doesn't exist
+
+    with open("../files/output/metrics.json", "w", encoding="utf-8") as f:
+        f.write(json.dumps(metrics_train) + "\n")
+        f.write(json.dumps(metrics_test) + "\n")
+        f.write(json.dumps(cm_matrix_train) + "\n")
+        f.write(json.dumps(cm_matrix_test) + "\n")
+
+train_data, test_data = load_data()
+train_data = clean_data(train_data)
+test_data = clean_data(test_data)
+
+x_train, x_test, y_train_true, y_test_true = make_train_test_split(train_data, test_data)
+
+metrics_train, metrics_test, cm_matrix_train, cm_matrix_test = eval_metrics(y_train_true, y_test_true, load_estimator().predict(x_train), load_estimator().predict(x_test))
+print(metrics_train)
+print(metrics_test)
+print(cm_matrix_train)
+print(cm_matrix_test)
+
+report(metrics_train, metrics_test, cm_matrix_train, cm_matrix_test)
+
+    
